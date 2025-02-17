@@ -1,1 +1,2 @@
 Useful links : [text](https://medium.com/towards-data-science/text-embeddings-comprehensive-guide-afd97fce8fb5)
+![alt text](graph.png)
