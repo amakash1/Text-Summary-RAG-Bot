@@ -2,10 +2,9 @@ import numpy as np
 from neo4j import GraphDatabase
 from langchain_ollama import OllamaEmbeddings
 
-# Neo4j Connection Details
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USERNAME = "neo4j"
-NEO4J_PASSWORD = ""
+NEO4J_PASSWORD = "floorgangster"
 
 EMBEDDING_MODEL = OllamaEmbeddings(model="deepseek-r1:1.5b")
 
@@ -17,8 +16,8 @@ class Neo4jVectorStore:
         self.driver.close()
 
     def store_document(self, doc_id, text):
-        """ Store document text along with embeddings """
-        embedding = EMBEDDING_MODEL.embed_query(text) # Ensure embedding is stored as list
+        """ Store document text along with embeddings and create relationships """
+        embedding = EMBEDDING_MODEL.embed_query(text)
 
         with self.driver.session() as session:
             session.run(
@@ -29,27 +28,46 @@ class Neo4jVectorStore:
                 doc_id=doc_id, text=text, embedding=embedding
             )
 
-    def search_similar_documents(self, query, top_k=3):
-        """ Fetch all stored embeddings and compute cosine similarity in Python """
-        query_embedding = np.array(EMBEDDING_MODEL.embed_query(query))
+            self.create_relationships(doc_id, embedding)
 
+    def create_relationships(self, doc_id, embedding):
+        """ Find similar documents and create SIMILAR_TO relationships """
         with self.driver.session() as session:
             result = session.run(
-                "MATCH (d:Document) RETURN d.text AS text, d.embedding AS embedding"
+                "MATCH (d:Document) RETURN d.id AS id, d.embedding AS embedding"
             )
 
-            docs = []
             for record in result:
-                text = record["text"]
-                embedding = np.array(record["embedding"])
+                existing_id = record["id"]
+                existing_embedding = np.array(record["embedding"])
 
-                # Compute cosine similarity manually
-                similarity = np.dot(query_embedding, embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(embedding))
-                docs.append((text, similarity))
+                similarity = np.dot(embedding, existing_embedding) / (np.linalg.norm(embedding) * np.linalg.norm(existing_embedding))
 
-            # Sort results by similarity score
-            docs.sort(key=lambda x: x[1], reverse=True)
-            return [doc[0] for doc in docs[:top_k]]
+                if similarity > 0.7 and existing_id != doc_id:
+                    session.run(
+                        """
+                        MATCH (a:Document {id: $doc_id}), (b:Document {id: $existing_id})
+                        MERGE (a)-[:SIMILAR_TO {score: $similarity}]->(b)
+                        """,
+                        doc_id=doc_id, existing_id=existing_id, similarity=similarity
+                    )
 
-# Initialize Neo4j Vector Store
+    def search_similar_documents(self, user_query, top_k=3):
+        """ Fetch similar documents based on relationships """
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (d:Document)-[s:SIMILAR_TO]->(other)
+                WHERE d.text CONTAINS $user_query
+                RETURN other.text AS text, s.score AS similarity
+                ORDER BY s.score DESC
+                LIMIT $top_k
+                """,
+                user_query=user_query, 
+                top_k=top_k
+            )
+
+            return [record["text"] for record in result]
+
+
 neo4j_store = Neo4jVectorStore()
